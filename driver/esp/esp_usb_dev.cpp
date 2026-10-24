@@ -60,6 +60,16 @@ ESP32USBDevice::ESP32USBDevice(
         auto* self = static_cast<ESP32USBDevice*>(context);
         portEXIT_CRITICAL_SAFE(&self->hardware_mux_);
       });
+#if CONFIG_IDF_TARGET_ESP32S2
+  // S2 冷启动时 USB 时钟已关闭，读取 GHWCFG3 可能阻塞总线。构造与 Init 都会访问
+  // 寄存器，因此必须在第一次 FIFO 查询前准备 PHY；Start 复用同一份资源。
+  // A cold S2 starts with the USB clock disabled; reading GHWCFG3 can stall the bus.
+  // Construction and Init both access registers, so prepare the PHY before the first
+  // FIFO query. Start reuses these resources.
+  EnsureRomUsbCleaned();
+  [[maybe_unused]] const auto ensure_phy_ready_result = EnsurePhyReady();
+  REQUIRE(ensure_phy_ready_result);
+#endif
   ResetFifoState();
   ASSERT(ep_cfgs.size() > 0U && ep_cfgs.size() <= ENDPOINT_COUNT);
 
@@ -520,10 +530,9 @@ void ESP32USBDevice::ResetDeviceState()
   // reset, clear the device-level register state first; each endpoint later rebuilds its
   // own concrete hardware configuration.
   ResetFifoState();
-  // Init() 在 Start() 打开内核时钟之前也会重置账本，此时读到的深度为 0；
-  // 这里内核已经上电。
-  // Init() also resets the bookkeeping before Start() clocks the core, when the depth
-  // reads as 0; here the core is powered.
+  // 此处内核已上电，FIFO 深度必须有效；不能假设关闭时钟的寄存器读取会返回 0。
+  // The core is powered here, so its FIFO depth must be valid. An unclocked register
+  // read is not guaranteed to return zero.
   DEV_ASSERT(fifo_state_.depth_words > 0U);
   ResetControlState();
 
